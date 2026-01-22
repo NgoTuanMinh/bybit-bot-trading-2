@@ -1,0 +1,21 @@
+Các bước setup trên Bybit Testnet:
+Tạo API Key:
+Vào https://testnet.bybit.com/
+API Management → Create New Key
+Chọn quyền Read và Trade
+Lưu API Key và Secret
+Tạo file .env:
+   BYBIT_API_KEY=your_api_key_here   BYBIT_API_SECRET=your_api_secret_here   TESTNET=true   BYBIT_SYMBOLS=BTCUSDT,ETHUSDT,... (50 symbols)   TIMEFRAME=M15   EMA_PERIOD=200   RISK_PER_TRADE=5   LEVERAGE=10   MAX_POSITIONS=5   STOP_LOSS_PCT=5   TAKE_PROFIT_PCT=3
+Cài đặt và chạy:
+   pip install -r requirements.txt   python main.py
+Lưu ý quan trọng:
+Tất cả biến cấu hình lưu trong file .env (không commit vào git)
+File .gitignore đã được tạo để bảo vệ .env
+Bot tự động reconnect nếu WebSocket bị ngắt
+Log được ghi vào console và file bot.log
+Luôn test trên Testnet trước khi dùng mainnet
+Tài liệu:
+SETUP_GUIDE.md - Hướng dẫn setup chi tiết từng bước
+QUICKSTART.md - Hướng dẫn nhanh
+README.md - Tài liệu đầy đủ về bot và chiến lược
+Bot đã sẵn sàng để test trên Bybit Testnet. Làm theo SETUP_GUIDE.md để bắt đầu.

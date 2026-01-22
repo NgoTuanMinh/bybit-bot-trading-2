@@ -1,0 +1,232 @@
+1. Task 1: Project Setup & Configuration
+Task ID: EMA_BOT_01
+Title: "Thiết lập cấu trúc project và configuration"
+Files:
+  - .env.example (template)
+  - .env (local, gitignore)
+  - config.py
+  - requirements.txt
+  - main.py (entry point)
+
+Requirements:
+  1. Đọc 50 symbols từ biến môi trường BYBIT_SYMBOLS
+  2. Các thông số config:
+     - TIMEFRAME: M15
+     - EMA_PERIOD: 200
+     - RISK_PER_TRADE: 5% (tài khoản)
+     - LEVERAGE: 10x
+     - MAX_POSITIONS: 5
+     - STOP_LOSS_PCT: 5%
+     - TAKE_PROFIT_PCT: 3%
+     - TESTNET: True/False
+
+Steps:
+  1. Tạo .env.example với các biến mẫu
+  2. Tạo config.py đọc từ .env
+  3. Tạo main.py cấu trúc cơ bản
+  4. Viết hàm load_symbols() từ string (csv format)
+
+2. Task 2: Kline Data Fetcher & EMA Calculator
+Task ID: EMA_BOT_02
+Title: "Lấy dữ liệu nến M15 và tính EMA200"
+Requirements:
+  - Fetch historical klines từ Bybit (1000 nến)
+  - Tính EMA200 cho mỗi nến
+  - Cập nhật real-time khi có nến mới
+  - Lưu trữ dữ liệu cho 50 symbols
+
+Classes:
+  1. KlineDataManager:
+     - fetch_historical(symbol, limit=1000)
+     - add_new_kline(symbol, kline_data)
+     - calculate_ema(symbol, period=200)
+     - get_current_ema(symbol)
+
+  2. EMAIndicator:
+     - calculate(data, period)
+     - update(new_price)
+     - get_value()
+
+Logic:
+  - Mỗi symbol cần lưu 1000 nến M15
+  - Tính EMA200 mỗi khi có nến mới đóng
+  - So sánh giá close với EMA200
+
+3. Task 3: WebSocket Multi-Symbol Monitor (M15)
+Task ID: EMA_BOT_03
+Title: "Theo dõi real-time 50 symbols khung M15"
+Requirements:
+  - Subscribe kline.M15 cho 50 symbols
+  - Phát hiện khi nến đóng (15 phút)
+  - Ghi nhận giá close và cập nhật EMA
+  - Phát hiện crossover
+
+WebSocket Subscription:
+  - Kênh: "kline.15.{symbol}"
+  - Xử lý khi "confirm": true (nến đã đóng)
+
+Data Structure:
+  {
+    "BTCUSDT": {
+      "current_candle": {...},
+      "previous_candle": {...},
+      "ema_200": 50000.5,
+      "last_cross": null,  # "bullish" | "bearish" | null
+      "is_above_ema": true
+    }
+  }
+
+Logic phát hiện crossover:
+  1. Previous candle: close < EMA200
+  2. Current candle: close > EMA200
+  3. → Bearish crossover (SHORT signal)
+
+  1. Previous candle: close > EMA200  
+  2. Current candle: close < EMA200
+  3. → Bullish crossover (LONG signal)
+
+4. Task ID: EMA_BOT_04
+Title: "Quản lý vị thế và tính toán rủi ro"
+Requirements:
+  - Theo dõi tài khoản hiện tại (wallet balance)
+  - Giới hạn 5 positions cùng lúc
+  - Mỗi position 5% tài khoản với đòn bẩy 10x
+  - Tính stop loss và take profit tự động
+
+Classes:
+  1. AccountManager:
+     - get_balance() → float
+     - update_balance(pnl)
+     - get_available_margin() → float
+
+  2. PositionManager:
+     - active_positions: Dict[symbol, position_data]
+     - max_positions: 5
+     - can_open_position(symbol) → bool
+     - calculate_position_size(account_balance, price) → float
+     - calculate_sl_tp(entry_price, side) → (sl_price, tp_price)
+
+Calculation Formulas:
+  - Position Size = (Account Balance × 5%) × Leverage / Entry Price
+  - LONG: SL = Entry × (1 - 5%), TP = Entry × (1 + 3%)
+  - SHORT: SL = Entry × (1 + 5%), TP = Entry × (1 - 3%)
+
+5. Task 5: Trading Signal Generator
+Task ID: EMA_BOT_05  
+Title: "Phát hiện tín hiệu EMA200 Crossover và tạo lệnh"
+Requirements:
+  - Chỉ tạo signal khi KHÔNG có position hiện tại cho symbol đó
+  - Xác nhận crossover (giá cắt qua EMA200)
+  - Tạo order params đầy đủ
+
+Signal Conditions:
+  BEARISH CROSSOVER (SHORT):
+    - Previous candle: Close < EMA200
+    - Current candle: Close > EMA200  
+    - No existing position for symbol
+    - Less than 5 active positions
+
+  BULLISH CROSSOVER (LONG):
+    - Previous candle: Close > EMA200
+    - Current candle: Close < EMA200
+    - No existing position for symbol  
+    - Less than 5 active positions
+
+Order Parameters:
+  {
+    "symbol": "BTCUSDT",
+    "side": "Sell" | "Buy",
+    "order_type": "Market",
+    "qty": 0.01,  # calculated
+    "sl_price": 49500,  # calculated
+    "tp_price": 51500   # calculated
+  }
+
+6. Task ID: EMA_BOT_06
+Title: "Thực thi lệnh giao dịch với Bybit API"
+Requirements:
+  - Place market order với qty tính toán
+  - Set stop loss ngay sau khi order filled
+  - Set take profit ngay sau khi order filled
+  - Theo dõi trạng thái position
+
+API Calls:
+  1. POST /v5/order/create (market order)
+  2. POST /v5/position/trading-stop (set SL/TP)
+  3. GET /v5/position/list (check existing positions)
+
+Execution Flow:
+  1. Nhận signal từ generator
+  2. Kiểm tra position manager (có được mở không?)
+  3. Tính toán position size
+  4. Gửi market order
+  5. Nếu order thành công → set SL/TP
+  6. Cập nhật position manager
+
+7. Task 7: Position Tracker & Exit Manager
+Task ID: EMA_BOT_07
+Title: "Theo dõi vị thế và xử lý khi đóng lệnh"
+Requirements:
+  - Subscribe private WebSocket cho position updates
+  - Theo dõi khi position đóng (SL/TP trigger)
+  - Cập nhật account balance
+  - Dọn dẹp position data
+
+WebSocket Channels:
+  - position
+  - execution
+
+Exit Conditions:
+  1. Stop Loss hit → position đóng
+  2. Take Profit hit → position đóng
+  3. Manual close (optional)
+
+Handlers:
+  - on_position_update(): cập nhật PnL, status
+  - on_execution_update(): log khi lệnh đóng
+  - cleanup_position(symbol): xóa khỏi active positions
+
+8. Task 8: Main Bot Orchestrator
+Task ID: EMA_BOT_08
+Title: "Kết nối tất cả modules và chạy bot"
+Requirements:
+  - Khởi tạo tất cả components
+  - Chạy WebSocket connections
+  - Xử lý signals real-time
+  - Monitoring và logging
+
+Orchestration Flow:
+  1. Khởi động:
+     - Load config
+     - Init KlineDataManager (fetch historical)
+     - Init PositionManager
+     - Init TradingEngine
+     - Connect WebSockets
+  
+  2. Main Loop:
+     - WebSocket: nhận kline updates
+     - Khi nến đóng: cập nhật EMA
+     - Kiểm tra crossover
+     - Nếu có signal: gửi qua TradingEngine
+     - TradingEngine: kiểm tra risk, vào lệnh
+     - PositionManager: theo dõi vị thế
+  
+  3. Cleanup:
+     - Close all positions on shutdown
+     - Save state (optional)
+
+
+
+List symbols:
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "TRXUSDT",
+    "MATICUSDT", "LINKUSDT", "TONUSDT", "ICPUSDT", "SHIBUSDT",
+    "LTCUSDT", "BCHUSDT", "UNIUSDT", "ATOMUSDT", "XLMUSDT",
+    "FILUSDT", "ETCUSDT", "APTUSDT", "NEARUSDT", "OPUSDT",
+    "ARBUSDT", "VETUSDT", "AAVEUSDT", "ALGOUSDT", "MANAUSDT",
+    "EGLDUSDT", "SANDUSDT", "AXSUSDT", "THETAUSDT", "XTZUSDT",
+    "FTMUSDT", "EOSUSDT", "MKRUSDT", "CRVUSDT", "KAVAUSDT",
+    "RUNEUSDT", "GALAUSDT", "PEOPLEUSDT", "WAVESUSDT", "ZILUSDT",
+    "IOTAUSDT", "ENJUSDT", "ONEUSDT", "CHZUSDT", "BATUSDT"
+]
