@@ -108,10 +108,22 @@ class TradingBot:
             on_candle_close=self.on_candle_close
         )
         
-        self.position_tracker = PositionTracker(
-            self.position_manager,
-            on_position_closed=self.on_position_closed
-        )
+        # Position tracker is optional - can be disabled if WebSocket issues occur
+        # Bot will still work, just sync positions via API instead of real-time WebSocket
+        if config.ENABLE_POSITION_TRACKER:
+            try:
+                self.position_tracker = PositionTracker(
+                    self.position_manager,
+                    on_position_closed=self.on_position_closed
+                )
+                logger.info("Position tracker initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize position tracker: {e}")
+                logger.warning("Bot will continue without real-time position tracking (will sync via API)")
+                self.position_tracker = None
+        else:
+            logger.info("Position tracker disabled (ENABLE_POSITION_TRACKER=false)")
+            self.position_tracker = None
         
         logger.info("Initialization complete!")
     
@@ -126,7 +138,15 @@ class TradingBot:
         
         # Start WebSocket connections
         self.ws_monitor.start()
-        self.position_tracker.start()
+        
+        # Start position tracker if available
+        if self.position_tracker:
+            try:
+                self.position_tracker.start()
+            except Exception as e:
+                logger.warning(f"Failed to start position tracker: {e}")
+                logger.warning("Bot will continue without real-time position tracking")
+                self.position_tracker = None
         
         # Wait a bit for connections to establish
         time.sleep(3)
@@ -166,7 +186,10 @@ class TradingBot:
         if self.ws_monitor:
             self.ws_monitor.stop()
         if self.position_tracker:
-            self.position_tracker.stop()
+            try:
+                self.position_tracker.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping position tracker: {e}")
         
         # Close all positions (optional - comment out if you want to keep positions open)
         # logger.info("Closing all positions...")

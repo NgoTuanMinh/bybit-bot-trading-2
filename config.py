@@ -48,6 +48,9 @@ class Config:
     STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "5"))  # Percentage
     TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3"))  # Percentage
     
+    # Optional features
+    ENABLE_POSITION_TRACKER = os.getenv("ENABLE_POSITION_TRACKER", "true").lower() == "true"
+    
     # Bybit API URLs
     @property
     def base_url(self) -> str:

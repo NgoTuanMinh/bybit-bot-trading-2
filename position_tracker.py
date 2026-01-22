@@ -24,14 +24,19 @@ class PositionTracker:
         self.on_position_closed = on_position_closed
         self.ws: Optional[websocket.WebSocketApp] = None
         self.is_running = False
-        self.reconnect_interval = 5
+        self.reconnect_interval = 10  # Tăng thời gian reconnect
         self.thread: Optional[threading.Thread] = None
+        self.ping_interval = 20  # Ping mỗi 20 giây để keep connection alive
+        self.last_ping_time = 0
+        self.authenticated = False
     
     def _generate_signature(self, expires: int) -> str:
         """Generate signature for WebSocket authentication"""
+        # Bybit v5 WebSocket auth format: GET/realtime{expires}
+        param_str = f"GET/realtime{expires}"
         signature = hmac.new(
             config.API_SECRET.encode("utf-8"),
-            f"GET/realtime{expires}".encode("utf-8"),
+            param_str.encode("utf-8"),
             hashlib.sha256
         ).hexdigest()
         return signature
@@ -41,10 +46,16 @@ class PositionTracker:
         try:
             data = json.loads(message)
             
+            # Handle ping/pong (keep connection alive)
+            if isinstance(data, dict) and data.get("op") == "pong":
+                logger.debug("Received pong")
+                return
+            
             # Handle authentication response
-            if "op" in data and data["op"] == "auth":
+            if isinstance(data, dict) and "op" in data and data["op"] == "auth":
                 if data.get("success"):
                     logger.info("WebSocket authenticated successfully")
+                    self.authenticated = True
                     # Subscribe to position and execution channels
                     subscribe_msg = {
                         "op": "subscribe",
@@ -53,11 +64,20 @@ class PositionTracker:
                     ws.send(json.dumps(subscribe_msg))
                     logger.info("Subscribed to position and execution channels")
                 else:
-                    logger.error(f"WebSocket authentication failed: {data.get('ret_msg')}")
+                    logger.error(f"WebSocket authentication failed: {data.get('ret_msg', data)}")
+                    self.authenticated = False
+                return
+            
+            # Handle subscription confirmation
+            if isinstance(data, dict) and "op" in data and data["op"] == "subscribe":
+                if data.get("success"):
+                    logger.info(f"Subscription confirmed: {data.get('args', [])}")
+                else:
+                    logger.warning(f"Subscription failed: {data.get('ret_msg', data)}")
                 return
             
             # Handle position updates
-            if "topic" in data:
+            if isinstance(data, dict) and "topic" in data:
                 topic = data["topic"]
                 
                 if topic == "position":
@@ -65,6 +85,8 @@ class PositionTracker:
                 elif topic == "execution":
                     self._handle_execution_update(data.get("data", []))
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse WebSocket message: {e}, message: {message[:200]}")
         except Exception as e:
             logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
     
@@ -135,33 +157,76 @@ class PositionTracker:
     
     def _on_error(self, ws, error):
         """Handle WebSocket errors"""
-        logger.error(f"WebSocket error: {error}")
+        if isinstance(error, Exception):
+            logger.error(f"WebSocket error: {error}", exc_info=True)
+        else:
+            logger.error(f"WebSocket error: {error}")
+        
+        # Reset authenticated flag on error
+        self.authenticated = False
     
     def _on_close(self, ws, close_status_code, close_msg):
         """Handle WebSocket close"""
-        logger.warning("Private WebSocket connection closed")
-        self.is_running = False
+        logger.warning(f"Private WebSocket connection closed. Code: {close_status_code}, Message: {close_msg}")
+        self.authenticated = False
         
-        # Attempt to reconnect
+        # Attempt to reconnect if still running
         if self.is_running:
             logger.info(f"Attempting to reconnect in {self.reconnect_interval} seconds...")
             time.sleep(self.reconnect_interval)
-            self.start()
+            if self.is_running:
+                self.start()
     
     def _on_open(self, ws):
         """Handle WebSocket open - authenticate"""
         logger.info("Private WebSocket connection opened")
+        self.authenticated = False
         
-        # Authenticate
-        expires = int((time.time() + 10000) * 1000)  # 10 seconds from now
+        # Wait a bit before authenticating to ensure connection is stable
+        time.sleep(2)
+        
+        # Authenticate - Bybit v5 format
+        expires = int((time.time() + 10000) * 1000)  # 10 seconds from now (milliseconds)
         signature = self._generate_signature(expires)
         
         auth_msg = {
             "op": "auth",
-            "args": [config.API_KEY, expires, signature]
+            "args": [config.API_KEY, str(expires), signature]  # expires as string
         }
-        ws.send(json.dumps(auth_msg))
-        logger.info("Sent authentication request")
+        
+        try:
+            auth_json = json.dumps(auth_msg)
+            logger.debug(f"Auth message: {auth_json}")
+            ws.send(auth_json)
+            logger.info(f"Sent authentication request (expires: {expires})")
+            
+            # Wait for auth response
+            time.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"Failed to send authentication: {e}", exc_info=True)
+            self.authenticated = False
+    
+    def _send_ping(self):
+        """Send ping to keep connection alive"""
+        if self.ws and self.authenticated:
+            try:
+                ping_msg = {"op": "ping"}
+                self.ws.send(json.dumps(ping_msg))
+                self.last_ping_time = time.time()
+                logger.debug("Sent ping")
+            except Exception as e:
+                logger.warning(f"Failed to send ping: {e}")
+    
+    def _ping_loop(self):
+        """Ping loop to keep connection alive"""
+        while self.is_running:
+            try:
+                time.sleep(self.ping_interval)
+                if time.time() - self.last_ping_time >= self.ping_interval:
+                    self._send_ping()
+            except Exception as e:
+                logger.error(f"Error in ping loop: {e}")
     
     def start(self):
         """Start WebSocket connection"""
@@ -170,11 +235,17 @@ class PositionTracker:
             return
         
         self.is_running = True
+        self.authenticated = False
         
         def run_websocket():
             while self.is_running:
                 try:
                     logger.info(f"Connecting to private WebSocket: {config.ws_private_url}")
+                    
+                    # Start ping thread
+                    ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+                    ping_thread.start()
+                    
                     self.ws = websocket.WebSocketApp(
                         config.ws_private_url,
                         on_message=self._on_message,
@@ -182,11 +253,19 @@ class PositionTracker:
                         on_close=self._on_close,
                         on_open=self._on_open
                     )
-                    self.ws.run_forever()
+                    
+                    # Run with ping interval
+                    self.ws.run_forever(
+                        ping_interval=20,
+                        ping_timeout=10
+                    )
                     
                     if self.is_running:
-                        logger.info(f"Reconnecting in {self.reconnect_interval} seconds...")
+                        logger.warning("WebSocket connection lost, reconnecting...")
                         time.sleep(self.reconnect_interval)
+                except KeyboardInterrupt:
+                    logger.info("Received keyboard interrupt")
+                    break
                 except Exception as e:
                     logger.error(f"WebSocket exception: {e}", exc_info=True)
                     if self.is_running:

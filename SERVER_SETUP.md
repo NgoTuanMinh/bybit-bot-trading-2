@@ -136,9 +136,26 @@ python3 main.py
 
 Nếu chạy thành công, bạn sẽ thấy log. Nhấn `Ctrl+C` để dừng.
 
-## Bước 7: Chạy Bot ở Background (Screen/Tmux)
+## Bước 7: Chạy Bot ở Background (Chạy độc lập)
 
-### Cách 1: Sử dụng Screen
+⚠️ **QUAN TRỌNG:** Nếu bạn chạy bot trực tiếp bằng `python3 main.py` và đóng terminal, bot sẽ bị tắt!
+
+Có 3 cách để bot chạy độc lập (không bị tắt khi đóng terminal):
+
+### ⭐ Cách 1: Systemd Service (KHUYẾN NGHỊ - Tốt nhất)
+
+**Ưu điểm:**
+- ✅ Bot chạy hoàn toàn độc lập, không bị ảnh hưởng khi đóng terminal
+- ✅ Tự động restart nếu bot crash
+- ✅ Tự động chạy khi server khởi động
+- ✅ Quản lý dễ dàng với `systemctl`
+- ✅ Log tự động vào file
+
+**Xem hướng dẫn chi tiết ở Bước 8 bên dưới.**
+
+### Cách 2: Sử dụng Screen
+
+**Lưu ý:** Bot sẽ chạy độc lập NHƯNG bạn phải **detach** trước khi đóng terminal!
 
 ```bash
 # Cài đặt screen (nếu chưa có)
@@ -155,13 +172,25 @@ source venv/bin/activate
 # Chạy bot
 python3 main.py
 
-# Detach khỏi screen: Nhấn Ctrl+A, sau đó D
-# Reattach vào screen: screen -r trading-bot
-# Xem danh sách screen: screen -ls
-# Kill screen: screen -X -S trading-bot quit
+# ⚠️ QUAN TRỌNG: Detach khỏi screen TRƯỚC KHI ĐÓNG TERMINAL
+# Nhấn Ctrl+A, sau đó D (không nhấn Ctrl+C!)
+# Sau khi detach, bạn có thể đóng terminal an toàn
+
+# Reattach vào screen (khi cần xem log):
+screen -r trading-bot
+
+# Xem danh sách screen:
+screen -ls
+
+# Kill screen (dừng bot):
+screen -X -S trading-bot quit
 ```
 
-### Cách 2: Sử dụng Tmux
+**⚠️ Cảnh báo:** Nếu bạn đóng terminal mà chưa detach, bot sẽ bị tắt!
+
+### Cách 3: Sử dụng Tmux
+
+**Lưu ý:** Bot sẽ chạy độc lập NHƯNG bạn phải **detach** trước khi đóng terminal!
 
 ```bash
 # Cài đặt tmux (nếu chưa có)
@@ -178,13 +207,151 @@ source venv/bin/activate
 # Chạy bot
 python3 main.py
 
-# Detach khỏi tmux: Nhấn Ctrl+B, sau đó D
-# Reattach vào tmux: tmux attach -t trading-bot
-# Xem danh sách tmux: tmux ls
-# Kill tmux: tmux kill-session -t trading-bot
+# ⚠️ QUAN TRỌNG: Detach khỏi tmux TRƯỚC KHI ĐÓNG TERMINAL
+# Nhấn Ctrl+B, sau đó D (không nhấn Ctrl+C!)
+# Sau khi detach, bạn có thể đóng terminal an toàn
+
+# Reattach vào tmux (khi cần xem log):
+tmux attach -t trading-bot
+
+# Xem danh sách tmux:
+tmux ls
+
+# Kill tmux (dừng bot):
+tmux kill-session -t trading-bot
 ```
 
-## Bước 8: Tạo Systemd Service (Tự động chạy khi khởi động)
+**⚠️ Cảnh báo:** Nếu bạn đóng terminal mà chưa detach, bot sẽ bị tắt!
+
+### Cách 4: Sử dụng PM2 (Khuyến nghị cho Node.js developers)
+
+**Ưu điểm:**
+- ✅ Bot chạy hoàn toàn độc lập, **KHÔNG BỊ TẮT** khi đóng terminal
+- ✅ Tự động restart nếu bot crash
+- ✅ Quản lý dễ dàng với CLI
+- ✅ Web dashboard (optional)
+- ✅ Log management tốt
+- ✅ Không cần sudo (chạy với user thường)
+
+**Nhược điểm:**
+- ⚠️ Cần cài Node.js và PM2
+- ⚠️ Cần setup startup script để tự động chạy khi server khởi động
+
+**Cách setup:**
+
+1. Cài đặt Node.js và PM2:
+```bash
+# Cài Node.js (nếu chưa có)
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs  # Ubuntu/Debian
+# hoặc
+sudo yum install -y nodejs npm  # CentOS
+
+# Cài PM2 globally
+sudo npm install -g pm2
+```
+
+2. Tạo PM2 ecosystem file (optional nhưng khuyến nghị):
+```bash
+nano ecosystem.config.js
+```
+
+Copy nội dung:
+```javascript
+module.exports = {
+  apps: [{
+    name: 'bybit-trading-bot',
+    script: 'main.py',
+    interpreter: 'venv/bin/python3',
+    cwd: '/home/your-username/BybitBotTrading2',
+    instances: 1,
+    autorestart: true,
+    watch: false,
+    max_memory_restart: '1G',
+    env: {
+      NODE_ENV: 'production'
+    },
+    error_file: './bot_error.log',
+    out_file: './bot.log',
+    log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    merge_logs: true
+  }]
+};
+```
+
+**Thay thế:** `your-username` và đường dẫn project
+
+3. Chạy bot với PM2:
+```bash
+# Cách 1: Dùng ecosystem file (khuyến nghị)
+pm2 start ecosystem.config.js
+
+# Cách 2: Chạy trực tiếp
+pm2 start venv/bin/python3 --name bybit-trading-bot -- main.py
+
+# Cách 3: Chạy với working directory
+pm2 start main.py --name bybit-trading-bot --interpreter venv/bin/python3 --cwd $(pwd)
+```
+
+4. Quản lý bot:
+```bash
+# Xem danh sách processes
+pm2 list
+
+# Xem log real-time
+pm2 logs bybit-trading-bot
+
+# Xem log chỉ output
+pm2 logs bybit-trading-bot --lines 100
+
+# Restart bot
+pm2 restart bybit-trading-bot
+
+# Stop bot
+pm2 stop bybit-trading-bot
+
+# Delete bot (xóa khỏi PM2)
+pm2 delete bybit-trading-bot
+
+# Xem thông tin chi tiết
+pm2 show bybit-trading-bot
+
+# Monitor (CPU, Memory)
+pm2 monit
+```
+
+5. Setup tự động chạy khi server khởi động:
+```bash
+# Tạo startup script
+pm2 startup
+
+# Lệnh trên sẽ hiển thị một lệnh, copy và chạy nó
+# Ví dụ: sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u your-username --hp /home/your-username
+
+# Save current PM2 processes
+pm2 save
+```
+
+**✅ Với PM2, bạn có thể đóng terminal bình thường, bot vẫn chạy!**
+
+**Web Dashboard (optional):**
+```bash
+pm2 install pm2-server-monit
+# Sau đó truy cập: http://your-server-ip:9615
+```
+
+---
+
+## Bước 8: Tạo Systemd Service (KHUYẾN NGHỊ - Chạy hoàn toàn độc lập)
+
+**⭐ Đây là cách TỐT NHẤT để chạy bot độc lập!**
+
+Với systemd service:
+- ✅ Bot chạy hoàn toàn độc lập, **KHÔNG BỊ TẮT** khi bạn đóng terminal
+- ✅ Tự động restart nếu bot crash
+- ✅ Tự động chạy khi server khởi động lại
+- ✅ Quản lý dễ dàng với `systemctl`
+- ✅ Log tự động vào file
 
 ### Tạo service file:
 
@@ -241,6 +408,9 @@ sudo systemctl stop bybit-trading-bot
 
 # Restart service
 sudo systemctl restart bybit-trading-bot
+
+# ✅ Với systemd service, bạn có thể đóng terminal bình thường
+# Bot sẽ vẫn chạy độc lập và không bị ảnh hưởng!
 ```
 
 ## Bước 9: Cấu hình Firewall (Nếu cần)
