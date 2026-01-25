@@ -92,10 +92,11 @@ class KlineDataManager:
         Uses a lightweight get_kline(limit=1). Returns False on invalid or API error.
         """
         try:
+            interval = getattr(config, "kline_interval", "15")  # same as WS topic: 1,3,5,15,...,D,W,M
             r = self.session.get_kline(
                 category="linear",
                 symbol=symbol,
-                interval="15",
+                interval=interval,
                 limit=1
             )
             if r.get("retCode") != 0:
@@ -118,10 +119,11 @@ class KlineDataManager:
         """
         try:
             logger.info(f"Fetching historical klines for {symbol} (limit={limit})")
+            interval = getattr(config, "kline_interval", "15")  # must match WebSocket kline.{interval}.{symbol}
             response = self.session.get_kline(
                 category="linear",
                 symbol=symbol,
-                interval="15",
+                interval=interval,
                 limit=limit
             )
             if response.get("retCode") != 0:

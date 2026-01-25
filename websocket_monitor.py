@@ -34,10 +34,13 @@ class WebSocketMonitor:
         self._max_reconnect_delay = 60
         self.connected = False
 
-        # FIX_01/FIX_03: Subscribe only to valid symbols; fallback to config.SYMBOLS
+        # Bybit topic: kline.{interval}.{symbol} — interval 1,3,5,15,30,...,D,W,M (no "15m")
+        # https://bybit-exchange.github.io/docs/v5/websocket/public/kline
+        interval = getattr(config, "kline_interval", None) or "15"
         syms = symbols if symbols is not None else config.SYMBOLS
-        self.topics = [f"kline.15.{s}" for s in syms]
-        logger.info(f"WebSocket will subscribe to {len(self.topics)} kline topics")
+        self.topics = [f"kline.{interval}.{s}" for s in syms]
+        self._kline_prefix = f"kline.{interval}."
+        logger.info(f"WebSocket kline topics: kline.{interval}.{{symbol}} ({len(self.topics)} topics)")
     
     def _on_message(self, ws, message):
         """Handle incoming WebSocket messages. FIX_03: debug log, robust processing."""
@@ -53,7 +56,7 @@ class WebSocketMonitor:
 
             if "topic" in data:
                 topic = data["topic"]
-                if topic.startswith("kline.15."):
+                if topic.startswith(getattr(self, "_kline_prefix", "kline.15.")):
                     symbol = topic.split(".")[-1]
                     kline_arr = data.get("data") or []
                     if not isinstance(kline_arr, list):

@@ -1,6 +1,16 @@
 # Troubleshooting Guide
 
-## Lỗi WebSocket Position Tracker
+## Kline WebSocket topic format (Bybit v5)
+
+**Đúng:** `kline.15.BTCUSDT` (interval là số phút: 1,3,5,15,30,60,120,240,360,720 hoặc D,W,M)
+**Sai:** `kline.15m.BTCUSDT` — Bybit **không** dùng hậu tố "m" hay "min".
+
+- Tài liệu: https://bybit-exchange.github.io/docs/v5/websocket/public/kline
+- `TIMEFRAME` trong `.env`: dùng `15`, `M15`, `5`, `D`... sẽ được map sang interval chuẩn.
+
+---
+
+# Lỗi WebSocket Position Tracker
 
 ### Lỗi: "Connection to remote host was lost"
 
