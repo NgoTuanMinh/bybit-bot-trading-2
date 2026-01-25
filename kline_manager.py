@@ -14,45 +14,49 @@ logger = logging.getLogger(__name__)
 class EMAIndicator:
     """EMA (Exponential Moving Average) Indicator"""
     
-    def __init__(self, period: int = 200):
+    def __init__(self, period: int = 200, min_init_candles: int = 50):
         self.period = period
+        self.min_init_candles = min_init_candles  # FIX_04: min candles to init with SMA seed
         self.value: Optional[float] = None
         self.prices: deque = deque(maxlen=period)
     
-    def calculate(self, data: List[float]) -> float:
+    def calculate(self, data: List[float], min_init: Optional[int] = None) -> Optional[float]:
         """
-        Calculate EMA from a list of prices
-        EMA = Price(t) × k + EMA(y) × (1 – k)
-        where k = 2 / (N + 1), N = period
+        Calculate EMA from a list of prices.
+        FIX_04: If len(data) < period but >= min_init (default 50), use SMA of first min_init
+        as seed and iterate to end. Otherwise standard: first EMA = SMA of first period values.
         """
-        if len(data) < self.period:
+        mi = min_init if min_init is not None else self.min_init_candles
+        if len(data) < mi:
             return None
         
-        # Start with SMA for first value
-        sma = sum(data[:self.period]) / self.period
         multiplier = 2 / (self.period + 1)
-        
-        ema = sma
-        for price in data[self.period:]:
-            ema = (price * multiplier) + (ema * (1 - multiplier))
+        if len(data) >= self.period:
+            # Standard: first EMA = SMA of first period
+            sma = sum(data[:self.period]) / self.period
+            ema = sma
+            for price in data[self.period:]:
+                ema = (price * multiplier) + (ema * (1 - multiplier))
+        else:
+            # FIX_04: Limited data - use SMA of first min_init as seed
+            sma = sum(data[:mi]) / mi
+            ema = sma
+            for i in range(mi, len(data)):
+                ema = (data[i] * multiplier) + (ema * (1 - multiplier))
         
         self.value = ema
         return ema
     
-    def update(self, new_price: float) -> float:
+    def update(self, new_price: float) -> Optional[float]:
         """
-        Update EMA with new price
+        Update EMA with new price.
+        FIX_04: Uses min_init_candles when computing initial EMA from buffered prices.
         """
         self.prices.append(new_price)
-        
-        if len(self.prices) < self.period:
+        if len(self.prices) < self.min_init_candles:
             return None
-        
         if self.value is None:
-            # Calculate initial EMA from all prices
-            return self.calculate(list(self.prices))
-        
-        # Update EMA incrementally
+            return self.calculate(list(self.prices), min_init=self.min_init_candles)
         multiplier = 2 / (self.period + 1)
         self.value = (new_price * multiplier) + (self.value * (1 - multiplier))
         return self.value
@@ -71,128 +75,156 @@ class KlineDataManager:
             api_key=config.API_KEY,
             api_secret=config.API_SECRET
         )
-        self.klines: Dict[str, deque] = {}  # symbol -> deque of klines
-        self.emas: Dict[str, EMAIndicator] = {}  # symbol -> EMAIndicator
-        
-        # Symbol state tracking
+        self.klines: Dict[str, deque] = {}
+        self.emas: Dict[str, EMAIndicator] = {}
         self.symbol_state: Dict[str, dict] = {}
-    
-    def fetch_historical(self, symbol: str, limit: int = 1000) -> bool:
+        self._min_init = getattr(config, "EMA_MIN_INIT_CANDLES", 50)
+
+    def _get_close_price(self, k) -> float:
+        """Get close price from kline in list or dict format (FIX_03: WS sends dict)."""
+        if isinstance(k, dict):
+            return float(k.get("close", 0))
+        return float(k[4])
+
+    def validate_symbol(self, symbol: str) -> bool:
         """
-        Fetch historical klines from Bybit
-        Returns True if successful
+        FIX_01: Validate symbol exists and is tradeable before fetch.
+        Uses a lightweight get_kline(limit=1). Returns False on invalid or API error.
         """
         try:
-            logger.info(f"Fetching {limit} historical klines for {symbol}")
-            
+            r = self.session.get_kline(
+                category="linear",
+                symbol=symbol,
+                interval="15",
+                limit=1
+            )
+            if r.get("retCode") != 0:
+                logger.warning(f"Symbol {symbol} invalid or not available: {r.get('retMsg', 'unknown')}")
+                return False
+            return True
+        except Exception as e:
+            logger.warning(f"Symbol {symbol} validate failed: {e}")
+            return False
+
+    def get_valid_symbols(self) -> List[str]:
+        """FIX_01: Symbols that have been successfully loaded (for WebSocket subscription)."""
+        return list(self.klines.keys())
+
+    def fetch_historical(self, symbol: str, limit: int = 1000) -> bool:
+        """
+        Fetch historical klines from Bybit.
+        FIX_01: Wrapped in try-except; log.warning on failure; skip instead of crash.
+        FIX_04: EMA init with min 50 candles; symbol marked ready only when EMA available.
+        """
+        try:
+            logger.info(f"Fetching historical klines for {symbol} (limit={limit})")
             response = self.session.get_kline(
                 category="linear",
                 symbol=symbol,
-                interval="15",  # M15
+                interval="15",
                 limit=limit
             )
-            
-            if response["retCode"] != 0:
-                logger.error(f"Error fetching klines for {symbol}: {response['retMsg']}")
+            if response.get("retCode") != 0:
+                logger.warning(f"Fetch klines failed for {symbol}: {response.get('retMsg', 'unknown')}")
                 return False
-            
-            kline_list = response["result"]["list"]
-            # Reverse to get chronological order (oldest first)
+
+            kline_list = response.get("result", {}).get("list", [])
+            if not kline_list:
+                logger.warning(f"No kline data for {symbol}, skipping")
+                return False
+
+            kline_list = list(kline_list)
             kline_list.reverse()
-            
-            # Store klines
             self.klines[symbol] = deque(kline_list, maxlen=limit)
-            
-            # Calculate EMA
-            closes = [float(k[4]) for k in kline_list]  # close price is index 4
-            ema_indicator = EMAIndicator(period=config.EMA_PERIOD)
-            ema_value = ema_indicator.calculate(closes)
-            
-            if ema_value:
+
+            closes = [float(k[4]) for k in kline_list]
+            ema_indicator = EMAIndicator(
+                period=config.EMA_PERIOD,
+                min_init_candles=getattr(config, "EMA_MIN_INIT_CANDLES", 50)
+            )
+            ema_value = ema_indicator.calculate(closes, min_init=self._min_init)
+
+            if ema_value is not None:
                 self.emas[symbol] = ema_indicator
-                logger.info(f"EMA200 for {symbol}: {ema_value:.2f}")
+                logger.info(f"EMA{config.EMA_PERIOD} for {symbol}: {ema_value:.2f}")
             else:
-                logger.warning(f"Not enough data to calculate EMA200 for {symbol}")
-            
-            # Initialize symbol state
-            if kline_list:
-                current_candle = self._parse_kline(kline_list[-1])
-                self.symbol_state[symbol] = {
-                    "current_candle": current_candle,
-                    "previous_candle": self._parse_kline(kline_list[-2]) if len(kline_list) > 1 else None,
-                    "ema_200": ema_value,
-                    "last_cross": None,
-                    "is_above_ema": current_candle["close"] > ema_value if ema_value else None
-                }
-            
+                logger.warning(f"Not enough data for EMA init for {symbol} (have {len(closes)}, need >={self._min_init})")
+
+            ready = ema_value is not None
+            cur = self._parse_kline(kline_list[-1])
+            prev = self._parse_kline(kline_list[-2]) if len(kline_list) > 1 else None
+            self.symbol_state[symbol] = {
+                "current_candle": cur,
+                "previous_candle": prev,
+                "ema_200": ema_value,
+                "last_cross": None,
+                "is_above_ema": cur["close"] > ema_value if ema_value else None,
+                "ready": ready,
+            }
             return True
-            
+
         except Exception as e:
-            logger.error(f"Exception fetching historical klines for {symbol}: {e}", exc_info=True)
+            logger.warning(f"Exception fetching historical klines for {symbol}: {e}")
             return False
     
     def add_new_kline(self, symbol: str, kline_data: dict) -> bool:
         """
-        Add new kline data and update EMA
-        kline_data should be from WebSocket
+        Add new kline data and update EMA. kline_data from WebSocket (dict with open,close,confirm...).
+        FIX_03: Use _get_close_price when reading from self.klines (mixed list/dict).
+        FIX_04: Set ready=True only when ema_value is not None.
         """
         try:
             if symbol not in self.klines:
-                logger.warning(f"Symbol {symbol} not initialized, fetching historical first")
-                self.fetch_historical(symbol)
+                logger.warning(f"Symbol {symbol} not initialized, skipping kline update")
                 return False
-            
+
             parsed_kline = self._parse_kline(kline_data)
             close_price = parsed_kline["close"]
-            
-            # Check if this is a confirmed (closed) candle
             is_confirmed = kline_data.get("confirm", False)
-            
+
             if is_confirmed:
-                # Add to klines deque
                 self.klines[symbol].append(kline_data)
-                
-                # Update EMA
                 if symbol in self.emas:
                     ema_value = self.emas[symbol].update(close_price)
                 else:
-                    # Recalculate from all klines
-                    closes = [float(k[4]) for k in self.klines[symbol]]
-                    ema_indicator = EMAIndicator(period=config.EMA_PERIOD)
-                    ema_value = ema_indicator.calculate(closes)
+                    closes = [self._get_close_price(k) for k in self.klines[symbol]]
+                    ema_indicator = EMAIndicator(
+                        period=config.EMA_PERIOD,
+                        min_init_candles=getattr(config, "EMA_MIN_INIT_CANDLES", 50)
+                    )
+                    ema_value = ema_indicator.calculate(closes, min_init=self._min_init)
                     self.emas[symbol] = ema_indicator
-                
-                # Update symbol state
+
+                ready = ema_value is not None
                 if symbol in self.symbol_state:
-                    previous_candle = self.symbol_state[symbol]["current_candle"]
-                    self.symbol_state[symbol]["previous_candle"] = previous_candle
-                    self.symbol_state[symbol]["current_candle"] = parsed_kline
-                    self.symbol_state[symbol]["ema_200"] = ema_value
-                    self.symbol_state[symbol]["is_above_ema"] = close_price > ema_value if ema_value else None
-                
-                logger.debug(f"Updated {symbol}: Close={close_price:.2f}, EMA={ema_value:.2f if ema_value else None}")
+                    s = self.symbol_state[symbol]
+                    s["previous_candle"] = s["current_candle"]
+                    s["current_candle"] = parsed_kline
+                    s["ema_200"] = ema_value
+                    s["is_above_ema"] = close_price > ema_value if ema_value else None
+                    s["ready"] = ready
+
+                ema_str = f"{ema_value:.2f}" if ema_value is not None else "n/a"
+                logger.debug(f"Updated {symbol}: Close={close_price:.2f}, EMA={ema_str}, ready={ready}")
                 return True
             else:
-                # Update current candle (not confirmed yet)
                 if symbol in self.symbol_state:
                     self.symbol_state[symbol]["current_candle"] = parsed_kline
                 return False
-                
+
         except Exception as e:
-            logger.error(f"Exception adding new kline for {symbol}: {e}", exc_info=True)
+            logger.warning(f"Exception adding new kline for {symbol}: {e}")
             return False
     
     def calculate_ema(self, symbol: str, period: int = 200) -> Optional[float]:
-        """Calculate EMA for a symbol"""
+        """Calculate EMA for a symbol. Uses _get_close_price for mixed list/dict klines."""
         if symbol not in self.klines:
             return None
-        
-        closes = [float(k[4]) for k in self.klines[symbol]]
-        if len(closes) < period:
+        closes = [self._get_close_price(k) for k in self.klines[symbol]]
+        if len(closes) < max(period, self._min_init):
             return None
-        
-        ema_indicator = EMAIndicator(period=period)
-        return ema_indicator.calculate(closes)
+        ema_indicator = EMAIndicator(period=period, min_init_candles=self._min_init)
+        return ema_indicator.calculate(closes, min_init=self._min_init)
     
     def get_current_ema(self, symbol: str) -> Optional[float]:
         """Get current EMA value for a symbol"""

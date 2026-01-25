@@ -16,91 +16,115 @@ logger = logging.getLogger(__name__)
 
 class WebSocketMonitor:
     """WebSocket monitor for real-time kline data"""
-    
-    def __init__(self, kline_manager: KlineDataManager, on_candle_close: Optional[Callable] = None):
+
+    def __init__(
+        self,
+        kline_manager: KlineDataManager,
+        on_candle_close: Optional[Callable] = None,
+        symbols: Optional[list] = None,
+    ):
         self.kline_manager = kline_manager
         self.on_candle_close = on_candle_close
         self.ws: Optional[websocket.WebSocketApp] = None
         self.is_running = False
         self.reconnect_interval = 5
         self.thread: Optional[threading.Thread] = None
-        
-        # Build subscription topics
-        self.topics = [f"kline.15.{symbol}" for symbol in config.SYMBOLS]
+        # FIX_02: Exponential backoff
+        self._reconnect_attempts = 0
+        self._max_reconnect_delay = 60
+        self.connected = False
+
+        # FIX_01/FIX_03: Subscribe only to valid symbols; fallback to config.SYMBOLS
+        syms = symbols if symbols is not None else config.SYMBOLS
+        self.topics = [f"kline.15.{s}" for s in syms]
+        logger.info(f"WebSocket will subscribe to {len(self.topics)} kline topics")
     
     def _on_message(self, ws, message):
-        """Handle incoming WebSocket messages"""
+        """Handle incoming WebSocket messages. FIX_03: debug log, robust processing."""
         try:
             data = json.loads(message)
-            
+
+            # FIX_03: Optional debug logging of raw kline messages
+            if getattr(config, "DEBUG_WS_KLINE", False) and "topic" in data and "kline" in data.get("topic", ""):
+                topic = data.get("topic", "")
+                arr = data.get("data", [])
+                last = arr[-1] if arr else {}
+                logger.debug(f"WS kline: topic={topic} confirm={last.get('confirm')} data_len={len(arr)}")
+
             if "topic" in data:
                 topic = data["topic"]
                 if topic.startswith("kline.15."):
                     symbol = topic.split(".")[-1]
-                    kline_data = data.get("data", [])
-                    
-                    if kline_data:
-                        # Get the latest kline
-                        latest_kline = kline_data[-1]
-                        is_confirmed = latest_kline.get("confirm", False)
-                        
-                        # Add to kline manager
-                        self.kline_manager.add_new_kline(symbol, latest_kline)
-                        
-                        # If candle is confirmed (closed), trigger callback
+                    kline_arr = data.get("data") or []
+                    if not isinstance(kline_arr, list):
+                        kline_arr = [kline_arr] if kline_arr else []
+                    if kline_arr:
+                        latest = kline_arr[-1] if isinstance(kline_arr[-1], dict) else {}
+                        is_confirmed = latest.get("confirm", False)
+                        self.kline_manager.add_new_kline(symbol, latest)
                         if is_confirmed and self.on_candle_close:
-                            self.on_candle_close(symbol, latest_kline)
-            
-            elif "retMsg" in data:
-                # Response message
+                            self.on_candle_close(symbol, latest)
+                return
+
+            if data.get("op") == "pong":
+                logger.debug("WS pong received")
+                return
+            if "retMsg" in data:
                 logger.info(f"WebSocket response: {data.get('retMsg')}")
-            
+            if "success" in data and not data.get("success") and "ret_msg" in data:
+                logger.warning(f"WebSocket error: {data.get('ret_msg')}")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"WS message JSON error: {e}")
         except Exception as e:
-            logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
+            logger.warning(f"Error processing WebSocket message: {e}")
     
     def _on_error(self, ws, error):
-        """Handle WebSocket errors"""
-        logger.error(f"WebSocket error: {error}")
-    
+        """FIX_02: Handle WebSocket errors, update connection state."""
+        self.connected = False
+        logger.warning(f"WebSocket error: {error}")
+
     def _on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket close"""
-        logger.warning("WebSocket connection closed")
-        self.is_running = False
-        
-        # Attempt to reconnect
-        if self.is_running:
-            logger.info(f"Attempting to reconnect in {self.reconnect_interval} seconds...")
-            time.sleep(self.reconnect_interval)
-            self.start()
-    
+        """FIX_02: Handle close gracefully; do not set is_running=False (reconnect loop owns lifecycle)."""
+        self.connected = False
+        logger.warning(f"WebSocket connection closed (code={close_status_code}, msg={close_msg})")
+
     def _on_open(self, ws):
-        """Handle WebSocket open"""
-        logger.info("WebSocket connection opened")
-        
-        # Subscribe to kline topics
-        # Bybit v5 requires subscription in format: {"op": "subscribe", "args": ["topic1", "topic2", ...]}
-        # We need to subscribe in batches (max 10 topics per subscription)
+        """FIX_02: Set connected, reset backoff, log status. Subscribe in batches (max 10 per request)."""
+        self.connected = True
+        self._reconnect_attempts = 0
+        logger.info("WebSocket connection opened; connection status: connected")
+
+        # Bybit v5: {"op":"subscribe","args":["topic1",...]}; max 10 per subscribe
         batch_size = 10
         for i in range(0, len(self.topics), batch_size):
-            batch = self.topics[i:i + batch_size]
-            subscribe_msg = {
-                "op": "subscribe",
-                "args": batch
-            }
-            ws.send(json.dumps(subscribe_msg))
-            logger.info(f"Subscribed to {len(batch)} topics (batch {i // batch_size + 1})")
-            time.sleep(0.1)  # Small delay between batches
+            batch = self.topics[i : i + batch_size]
+            msg = {"op": "subscribe", "args": batch}
+            try:
+                ws.send(json.dumps(msg))
+                logger.info(f"Subscribed to {len(batch)} kline topics (batch {i // batch_size + 1})")
+            except Exception as e:
+                logger.warning(f"Subscribe batch failed: {e}")
+            time.sleep(0.15)
     
     def start(self):
-        """Start WebSocket connection"""
+        """Start WebSocket connection. FIX_02: ping/pong, exponential backoff, connection state."""
         if self.is_running:
             logger.warning("WebSocket monitor is already running")
             return
-        
         self.is_running = True
-        
+
         def run_websocket():
             while self.is_running:
+                # FIX_02: Exponential backoff when reconnecting (skip delay on first connect)
+                delay = min(
+                    self.reconnect_interval * (2 ** self._reconnect_attempts),
+                    self._max_reconnect_delay
+                )
+                if self._reconnect_attempts > 0:
+                    logger.info(f"Reconnecting in {delay:.0f}s (attempt {self._reconnect_attempts})...")
+                    time.sleep(delay)
+
                 try:
                     logger.info(f"Connecting to WebSocket: {config.ws_public_url}")
                     self.ws = websocket.WebSocketApp(
@@ -108,18 +132,18 @@ class WebSocketMonitor:
                         on_message=self._on_message,
                         on_error=self._on_error,
                         on_close=self._on_close,
-                        on_open=self._on_open
+                        on_open=self._on_open,
                     )
-                    self.ws.run_forever()
-                    
-                    if self.is_running:
-                        logger.info(f"Reconnecting in {self.reconnect_interval} seconds...")
-                        time.sleep(self.reconnect_interval)
+                    # FIX_02: Ping/pong heartbeat (30s interval, 10s timeout)
+                    self.ws.run_forever(ping_interval=30, ping_timeout=10)
                 except Exception as e:
-                    logger.error(f"WebSocket exception: {e}", exc_info=True)
-                    if self.is_running:
-                        time.sleep(self.reconnect_interval)
-        
+                    logger.warning(f"WebSocket exception: {e}")
+
+                if self.is_running:
+                    self._reconnect_attempts += 1
+                    continue
+                break
+
         self.thread = threading.Thread(target=run_websocket, daemon=True)
         self.thread.start()
         logger.info("WebSocket monitor thread started")

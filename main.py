@@ -7,7 +7,7 @@ import sys
 import time
 import logging
 from pybit.unified_trading import HTTP
-from config import config
+from config import config, get_symbols_to_fetch
 from kline_manager import KlineDataManager
 from websocket_monitor import WebSocketMonitor
 from position_manager import AccountManager, PositionManager
@@ -82,15 +82,26 @@ class TradingBot:
         """Initialize all components"""
         logger.info("Initializing bot components...")
         
-        # Step 1: Fetch historical klines for all symbols
-        logger.info("Fetching historical klines...")
-        for symbol in config.SYMBOLS:
+        # Step 1: Fetch historical klines (FIX_01: validate, skip invalid, continue on fail)
+        symbols_to_try = get_symbols_to_fetch()
+        skipped_net = set(config.SYMBOLS) - set(symbols_to_try)
+        if skipped_net and config.TESTNET:
+            logger.warning(f"Symbols not in Testnet list, skipping: {skipped_net}")
+        logger.info(f"Fetching historical klines for {len(symbols_to_try)} symbols...")
+        for symbol in symbols_to_try:
+            if not self.kline_manager.validate_symbol(symbol):
+                logger.warning(f"Symbol {symbol} invalid or not available, skipping")
+                continue
             success = self.kline_manager.fetch_historical(symbol, limit=1000)
             if success:
                 logger.info(f"✓ {symbol} historical data loaded")
             else:
-                logger.warning(f"✗ Failed to load {symbol} historical data")
+                logger.warning(f"✗ Failed to load {symbol} historical data, continuing")
             time.sleep(0.1)  # Rate limiting
+        valid = self.kline_manager.get_valid_symbols()
+        logger.info(f"Loaded {len(valid)} symbols. Valid for trading: {valid}")
+        if not valid:
+            logger.warning("No valid symbols loaded; WebSocket will not subscribe to any kline topics.")
         
         # Step 2: Sync existing positions
         logger.info("Syncing existing positions...")
@@ -101,11 +112,12 @@ class TradingBot:
         balance = self.account_manager.get_balance()
         logger.info(f"Account balance: {balance:.2f} USDT")
         
-        # Step 4: Initialize WebSocket monitors
+        # Step 4: Initialize WebSocket (FIX_01: subscribe only to valid symbols)
         logger.info("Initializing WebSocket connections...")
         self.ws_monitor = WebSocketMonitor(
             self.kline_manager,
-            on_candle_close=self.on_candle_close
+            on_candle_close=self.on_candle_close,
+            symbols=valid
         )
         
         # Position tracker is optional - can be disabled if WebSocket issues occur

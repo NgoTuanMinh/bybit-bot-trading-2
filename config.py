@@ -4,10 +4,26 @@ Loads settings from .env file
 """
 import os
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Set
 
 # Load environment variables
 load_dotenv()
+
+# FIX_01: Symbols known to be available on Bybit Testnet (linear perpetual)
+# SHIBUSDT and some others may not exist on testnet - exclude or validate at runtime
+TESTNET_AVAILABLE_SYMBOLS: Set[str] = frozenset([
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "TRXUSDT",
+    "MATICUSDT", "LINKUSDT", "TONUSDT", "LTCUSDT", "BCHUSDT",
+    "UNIUSDT", "ATOMUSDT", "XLMUSDT", "FILUSDT", "ETCUSDT",
+    "APTUSDT", "NEARUSDT", "OPUSDT", "ARBUSDT", "VETUSDT",
+    "AAVEUSDT", "ALGOUSDT", "MANAUSDT", "EGLDUSDT", "SANDUSDT",
+    "AXSUSDT", "THETAUSDT", "XTZUSDT", "FTMUSDT", "EOSUSDT",
+    "MKRUSDT", "CRVUSDT", "KAVAUSDT", "RUNEUSDT", "GALAUSDT",
+    "WAVESUSDT", "ZILUSDT", "IOTAUSDT", "ENJUSDT", "ONEUSDT",
+    "CHZUSDT", "BATUSDT",
+    # May not be on testnet - include for validate to filter: ICPUSDT, SHIBUSDT, PEOPLEUSDT
+])
 
 
 def load_symbols() -> List[str]:
@@ -42,6 +58,7 @@ class Config:
     # Trading Parameters
     TIMEFRAME = os.getenv("TIMEFRAME", "15")  # M15 = 15 minutes
     EMA_PERIOD = int(os.getenv("EMA_PERIOD", "200"))
+    EMA_MIN_INIT_CANDLES = int(os.getenv("EMA_MIN_INIT_CANDLES", "50"))  # FIX_04: min candles to init EMA
     RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "5"))  # Percentage
     LEVERAGE = int(os.getenv("LEVERAGE", "10"))
     MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
@@ -50,6 +67,7 @@ class Config:
     
     # Optional features
     ENABLE_POSITION_TRACKER = os.getenv("ENABLE_POSITION_TRACKER", "true").lower() == "true"
+    DEBUG_WS_KLINE = os.getenv("DEBUG_WS_KLINE", "false").lower() == "true"  # FIX_03: log raw kline messages
     
     # Bybit API URLs
     @property
@@ -84,3 +102,10 @@ class Config:
 
 # Global config instance
 config = Config()
+
+
+def get_symbols_to_fetch() -> List[str]:
+    """FIX_01: When TESTNET, return only symbols in TESTNET_AVAILABLE_SYMBOLS. Otherwise all."""
+    if not config.TESTNET:
+        return list(config.SYMBOLS)
+    return [s for s in config.SYMBOLS if s in TESTNET_AVAILABLE_SYMBOLS]

@@ -23,15 +23,17 @@ class SignalGenerator:
         Returns signal dict or None
         """
         try:
-            # Get symbol state
             state = self.kline_manager.get_symbol_state(symbol)
             if not state:
                 return None
-            
+            # FIX_04: Skip signals for symbols not ready (e.g. insufficient candles for EMA)
+            if not state.get("ready", False):
+                logger.debug(f"Symbol {symbol} not ready for trading (insufficient EMA data), skipping")
+                return None
+
             current_candle = state.get("current_candle")
             previous_candle = state.get("previous_candle")
             ema_200 = state.get("ema_200")
-            
             if not current_candle or not previous_candle or not ema_200:
                 return None
             
